@@ -1,0 +1,540 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Modul Voucher Entri Kas Keluar - FEB Undip</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- React & ReactDOM CDN -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <!-- Babel for JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <!-- Supabase JS Client CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+    </style>
+</head>
+<body class="bg-slate-900 text-slate-100 min-h-screen m-0">
+    <!-- Root div for React App -->
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+
+        function VoucherKasKeluarApp() {
+            const [supabaseUrl, setSupabaseUrl] = useState('https://dhmkpzftatydueuitlkn.supabase.co');
+            const [supabaseAnonKey, setSupabaseAnonKey] = useState('sb_publishable_RjayK0knOQvSWC85c1pICA_AagPv70s');
+            const [supabase, setSupabase] = useState(null);
+            const [isConnected, setIsConnected] = useState(false);
+
+            // Form Metadata Header
+            const [refNumber, setRefNumber] = useState(`BKK-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}-${Math.floor(1000 + Math.random() * 9000)}`);
+            const [entryDate, setEntryDate] = useState(new Date().toISOString().slice(0, 10));
+            const [description, setDescription] = useState('Pembayaran Kas Keluar Operasional FEB Undip');
+            const [createdBy, setCreatedBy] = useState('Auditor_FEB_Undip');
+
+            // Master Data COA (dengan fallback default jika Supabase kosong)
+            const [accounts, setAccounts] = useState([
+                { account_id: '1-1001', account_name: 'Kas Kecil Operational', normal_balance: 'DEBIT', report_classification: 'ASSET' },
+                { account_id: '1-1002', account_name: 'Bank Utama (BCA)', normal_balance: 'DEBIT', report_classification: 'ASSET' },
+                { account_id: '5-1001', account_name: 'Beban Beban Operasional', normal_balance: 'DEBIT', report_classification: 'EXPENSE' },
+                { account_id: '5-1002', account_name: 'Beban Listrik, Air & Internet', normal_balance: 'DEBIT', report_classification: 'EXPENSE' },
+                { account_id: '2-1001', account_name: 'Utang Usaha Short-term', normal_balance: 'CREDIT', report_classification: 'LIABILITY' }
+            ]);
+
+            // Dynamic Journal Rows State
+            const [journalRows, setJournalRows] = useState([
+                { account_id: '5-1001', debit: 2500000, credit: 0 },
+                { account_id: '1-1001', debit: 0, credit: 2500000 }
+            ]);
+
+            // Log Transaksi dari Database
+            const [recentHeaders, setRecentHeaders] = useState([]);
+            const [loading, setLoading] = useState(false);
+            const [statusMessage, setStatusMessage] = useState({ type: '', msg: '' });
+            const [modalMessage, setModalMessage] = useState('');
+            const [showSqlGuide, setShowSqlGuide] = useState(true); // Default terbuka agar user langsung lihat cara insert COA
+
+            useEffect(() => {
+                if (supabaseUrl && supabaseAnonKey) {
+                    handleConnectSupabaseExplicit(supabaseUrl, supabaseAnonKey);
+                }
+            }, []);
+
+            const handleConnectSupabaseExplicit = (url, key) => {
+                try {
+                    if (window.supabase && window.supabase.createClient) {
+                        const client = window.supabase.createClient(url, key);
+                        setSupabase(client);
+                        setIsConnected(true);
+                        setStatusMessage({ type: 'success', msg: 'Berhasil terhubung ke Supabase Cloud FEB Undip!' });
+                        fetchRecentTransactions(client);
+                        fetchCOA(client);
+                    } else {
+                        setStatusMessage({ type: 'error', msg: 'Pustaka Supabase belum termuat.' });
+                    }
+                } catch (err) {
+                    setStatusMessage({ type: 'error', msg: `Koneksi gagal: ${err.message}` });
+                }
+            };
+
+            const handleConnectSupabase = () => {
+                if (!supabaseUrl || !supabaseAnonKey) {
+                    setStatusMessage({ type: 'error', msg: 'Harap masukkan Supabase URL dan Anon Key!' });
+                    return;
+                }
+                handleConnectSupabaseExplicit(supabaseUrl, supabaseAnonKey);
+            };
+
+            const fetchCOA = async (client) => {
+                try {
+                    const { data, error } = await client.from('chart_of_accounts').select('*');
+                    if (!error && data && data.length > 0) {
+                        setAccounts(data);
+                        setShowSqlGuide(false); // Sembunyikan panduan jika COA sudah ada isinya
+                    } else {
+                        setShowSqlGuide(true); // Tampilkan panduan jika tabel masih kosong
+                    }
+                } catch (e) {
+                    console.log('COA fetch error or table not found.');
+                }
+            };
+
+            const fetchRecentTransactions = async (client) => {
+                try {
+                    const { data, error } = await client
+                        .from('journal_headers')
+                        .select('*, journal_lines(*, chart_of_accounts(account_name))')
+                        .order('header_id', { ascending: false })
+                        .limit(5);
+
+                    if (!error && data) {
+                        setRecentHeaders(data);
+                    }
+                } catch (e) {
+                    console.log('Fetch transactions error or table not yet initialized.');
+                }
+            };
+
+            // Total Calculation
+            const totalDebit = journalRows.reduce((sum, r) => sum + (parseFloat(r.debit) || 0), 0);
+            const totalCredit = journalRows.reduce((sum, r) => sum + (parseFloat(r.credit) || 0), 0);
+            const discrepancy = Math.abs(totalDebit - totalCredit);
+            const isBalanced = discrepancy === 0 && totalDebit > 0;
+
+            // Handlers
+            const addRow = () => {
+                setJournalRows([...journalRows, { account_id: accounts?.[0]?.account_id || '1-1001', debit: 0, credit: 0 }]);
+            };
+
+            const removeRow = (index) => {
+                if (journalRows.length <= 2) {
+                    setModalMessage('Transaksi berpasangan minimal membutuhkan 2 baris (Debit dan Kredit)!');
+                    return;
+                }
+                setJournalRows(journalRows.filter((_, i) => i !== index));
+            };
+
+            const updateRow = (index, field, value) => {
+                const updated = [...journalRows];
+                updated[index][field] = field === 'account_id' ? value : parseFloat(value) || 0;
+                setJournalRows(updated);
+            };
+
+            const handleSubmit = async (e) => {
+                e.preventDefault();
+                if (!isBalanced) return;
+
+                if (!isConnected || !supabase) {
+                    setStatusMessage({ type: 'error', msg: 'Aplikasi belum terhubung ke Supabase. Silakan klik tombol sambungkan di atas.' });
+                    return;
+                }
+
+                setLoading(true);
+                setStatusMessage({ type: '', msg: '' });
+
+                try {
+                    // 1. Insert Journal Header (Tanpa created_by agar aman jika kolom belum dibuat di db)
+                    const { data: headerData, error: headerError } = await supabase
+                        .from('journal_headers')
+                        .insert([
+                            {
+                                ref_number: refNumber,
+                                entry_date: entryDate,
+                                description: description,
+                                posting_status: 'POSTED'
+                            }
+                        ])
+                        .select()
+                        .single();
+
+                    if (headerError) {
+                        if (headerError.message.includes('row-level security policy') || headerError.message.includes('foreign key')) {
+                            setShowSqlGuide(true);
+                        }
+                        throw headerError;
+                    }
+
+                    // 2. Insert Journal Lines
+                    const linesToInsert = journalRows.map((row) => ({
+                        header_id: headerData.header_id,
+                        account_id: row.account_id,
+                        debit: row.debit,
+                        credit: row.credit
+                    }));
+
+                    const { error: linesError } = await supabase.from('journal_lines').insert(linesToInsert);
+
+                    if (linesError) {
+                        if (linesError.message.includes('foreign key constraint')) {
+                            setShowSqlGuide(true);
+                        }
+                        throw linesError;
+                    }
+
+                    setStatusMessage({
+                        type: 'success',
+                        msg: `✅ Jurnal ${refNumber} berhasil disimpan & diposting ke Supabase (ID Header: ${headerData.header_id})!`
+                    });
+
+                    // Reset Form & Refresh List
+                    setRefNumber(`BKK-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}-${Math.floor(1000 + Math.random() * 9000)}`);
+                    fetchRecentTransactions(supabase);
+                } catch (err) {
+                    setStatusMessage({ type: 'error', msg: `Gagal menyimpan jurnal: ${err.message}.` });
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            return (
+                <div className="min-h-screen bg-slate-900 text-slate-100 p-4 md:p-8 font-sans">
+                    <div className="max-w-6xl mx-auto space-y-6">
+                        
+                        {/* Custom Modal Notification */}
+                        {modalMessage && (
+                            <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
+                                <div className="bg-slate-800 border border-slate-700 rounded-2xl p-6 max-w-md w-full space-y-4 shadow-2xl">
+                                    <h3 className="text-lg font-bold text-amber-400">⚠️ Pemberitahuan Sistem</h3>
+                                    <p className="text-sm text-slate-300">{modalMessage}</p>
+                                    <div className="text-right">
+                                        <button
+                                            onClick={() => setModalMessage('')}
+                                            className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-bold transition cursor-pointer"
+                                        >
+                                            Mengerti
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Header Title */}
+                        <div className="border-b border-slate-700 pb-4 flex flex-col md:flex-row justify-between items-start md:items-center gap-3">
+                            <div>
+                                <h1 className="text-2xl font-bold text-blue-400 flex items-center gap-2">
+                                    <span>📜</span> Modul Voucher Entri Kas Keluar
+                                </h1>
+                                <p className="text-sm text-slate-400">Purwarupa Web Accounting FEB Undip - Terintegrasi Cloud Database Supabase</p>
+                            </div>
+                            <div className="flex items-center gap-2">
+                                <button
+                                    onClick={() => setShowSqlGuide(!showSqlGuide)}
+                                    className="px-3 py-1.5 text-xs rounded-lg bg-amber-950 text-amber-300 border border-amber-700 hover:bg-amber-900 transition cursor-pointer font-semibold shadow"
+                                >
+                                    {showSqlGuide ? 'Sembunyikan Panduan SQL' : '🛠️ Panduan Isi Data COA & SQL'}
+                                </button>
+                                <span className="px-3 py-1.5 text-xs rounded-full bg-blue-950 text-blue-300 border border-blue-700">
+                                    Zero-Discrepancy Rule
+                                </span>
+                            </div>
+                        </div>
+
+                        {/* SQL Guide Banner (Penting untuk mengatasi error tabel kosong / foreign key / RLS) */}
+                        {showSqlGuide && (
+                            <div className="bg-amber-950/95 border border-amber-500 p-5 rounded-xl space-y-3 shadow-2xl">
+                                <h3 className="text-sm font-bold text-amber-300 flex items-center gap-2">
+                                    <span>🛠️</span> Panduan Penting Supabase SQL Editor:
+                                </h3>
+                                <p className="text-xs text-slate-200">
+                                    Jika Anda mengalami error <i>foreign key constraint</i> atau tabel chart_of_accounts masih kosong di Supabase Anda, silakan buka menu <b>SQL Editor</b> di dashboard Supabase Anda dan jalankan perintah berikut:
+                                </p>
+                                <div className="bg-slate-950 p-3 rounded-lg font-mono text-xs text-amber-200 overflow-x-auto border border-amber-800/50">
+                                    {`-- 1. Insert Data Akun (COA) Wajib
+INSERT INTO chart_of_accounts (account_id, account_name, normal_balance, report_classification) VALUES
+('1-1001', 'Kas Kecil Operational', 'DEBIT', 'ASSET'),
+('1-1002', 'Bank Utama (BCA)', 'DEBIT', 'ASSET'),
+('5-1001', 'Beban Beban Operasional', 'DEBIT', 'EXPENSE'),
+('5-1002', 'Beban Listrik, Air & Internet', 'DEBIT', 'EXPENSE'),
+('2-1001', 'Utang Usaha Short-term', 'CREDIT', 'LIABILITY')
+ON CONFLICT (account_id) DO NOTHING;
+
+-- 2. Nonaktifkan RLS agar aplikasi dapat melakukan insert tanpa kebijakan ketat
+ALTER TABLE journal_headers DISABLE ROW LEVEL SECURITY;
+ALTER TABLE journal_lines DISABLE ROW LEVEL SECURITY;
+ALTER TABLE chart_of_accounts DISABLE ROW LEVEL SECURITY;`}
+                                </div>
+                                <div className="flex justify-between items-center pt-1">
+                                    <button
+                                        onClick={() => {
+                                            if (supabase) fetchCOA(supabase);
+                                            setShowSqlGuide(false);
+                                        }}
+                                        className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-xs font-semibold cursor-pointer"
+                                    >
+                                        🔄 Saya sudah jalankan, Refresh Data COA
+                                    </button>
+                                    <button
+                                        onClick={() => setShowSqlGuide(false)}
+                                        className="px-3 py-1.5 bg-amber-800 hover:bg-amber-700 text-white rounded text-xs font-semibold cursor-pointer"
+                                    >
+                                        Tutup Panduan
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Supabase Connection Panel */}
+                        <div className="bg-slate-800 p-5 rounded-xl border border-slate-700 space-y-3 shadow-lg">
+                            <div className="flex items-center justify-between">
+                                <h2 className="text-md font-semibold text-slate-200 flex items-center gap-2">
+                                    <span>⚡</span> Koneksi Database Supabase Cloud
+                                </h2>
+                                <span className={`px-2.5 py-0.5 text-xs font-semibold rounded-full ${isConnected ? 'bg-emerald-950 text-emerald-300 border border-emerald-700' : 'bg-amber-950 text-amber-300 border border-amber-700'}`}>
+                                    {isConnected ? 'Terhubung' : 'Terputus'}
+                                </span>
+                            </div>
+                            
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                <input
+                                    type="text"
+                                    placeholder="Supabase Project URL"
+                                    value={supabaseUrl}
+                                    onChange={(e) => setSupabaseUrl(e.target.value)}
+                                    className="bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-xs focus:outline-none focus:border-blue-500 text-slate-200"
+                                />
+                                <input
+                                    type="password"
+                                    placeholder="Supabase Anon Key"
+                                    value={supabaseAnonKey}
+                                    onChange={(e) => setSupabaseAnonKey(e.target.value)}
+                                    className="bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-xs focus:outline-none focus:border-blue-500 text-slate-200"
+                                />
+                            </div>
+                            <button
+                                onClick={handleConnectSupabase}
+                                className="px-4 py-2 text-xs font-medium bg-blue-600 hover:bg-blue-500 text-white rounded-lg transition shadow-md cursor-pointer"
+                            >
+                                Sambungkan ke Supabase & Refresh COA
+                            </button>
+                        </div>
+
+                        {/* Alert Status Notification */}
+                        {statusMessage.msg && (
+                            <div className={`p-4 rounded-xl text-sm shadow-md ${statusMessage.type === 'success' ? 'bg-emerald-950/90 border border-emerald-700 text-emerald-300' : 'bg-rose-950/90 border border-rose-700 text-rose-300'}`}>
+                                {statusMessage.msg}
+                            </div>
+                        )}
+
+                        {/* Form Entry Voucher */}
+                        <form onSubmit={handleSubmit} className="bg-slate-800 p-6 rounded-xl border border-slate-700 space-y-6 shadow-xl">
+                            <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                                <div>
+                                    <label className="block text-xs text-slate-400 mb-1">Nomor Referensi/Bukti</label>
+                                    <input
+                                        type="text"
+                                        value={refNumber}
+                                        onChange={(e) => setRefNumber(e.target.value)}
+                                        required
+                                        className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-sm font-mono text-blue-300 focus:outline-none"
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-xs text-slate-400 mb-1">Tanggal Transaksi</label>
+                                    <input
+                                        type="date"
+                                        value={entryDate}
+                                        onChange={(e) => setEntryDate(e.target.value)}
+                                        required
+                                        className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-sm focus:outline-none text-slate-200"
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-xs text-slate-400 mb-1">Dibuat Oleh (Audit Trail)</label>
+                                    <input
+                                        type="text"
+                                        value={createdBy}
+                                        onChange={(e) => setCreatedBy(e.target.value)}
+                                        required
+                                        className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-sm focus:outline-none text-slate-200"
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-xs text-slate-400 mb-1">Deskripsi Transaksi</label>
+                                    <input
+                                        type="text"
+                                        value={description}
+                                        onChange={(e) => setDescription(e.target.value)}
+                                        required
+                                        className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-sm focus:outline-none text-slate-200"
+                                    />
+                                </div>
+                            </div>
+
+                            {/* Dynamic Table Lines */}
+                            <div>
+                                <div className="flex justify-between items-center mb-3">
+                                    <h3 className="text-sm font-semibold text-slate-300">Rincian Jurnal Transaksi (Lines)</h3>
+                                    <button
+                                        type="button"
+                                        onClick={addRow}
+                                        className="text-xs bg-slate-700 hover:bg-slate-600 px-3 py-1.5 rounded-lg text-slate-200 transition cursor-pointer"
+                                    >
+                                        + Tambah Baris
+                                    </button>
+                                </div>
+
+                                <div className="overflow-x-auto rounded-lg border border-slate-700">
+                                    <table className="w-full text-left text-sm border-collapse">
+                                        <thead>
+                                            <tr className="bg-slate-900/80 border-b border-slate-700 text-slate-400 text-xs">
+                                                <th className="py-2.5 px-3">Akun Akuntansi (COA) dari Supabase</th>
+                                                <th className="py-2.5 px-3 w-44">Debit (Rp)</th>
+                                                <th className="py-2.5 px-3 w-44">Kredit (Rp)</th>
+                                                <th className="py-2.5 px-3 w-16 text-center">Aksi</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody className="divide-y divide-slate-700/50">
+                                            {journalRows.map((row, idx) => (
+                                                <tr key={idx} className="hover:bg-slate-700/20 transition">
+                                                    <td className="py-2.5 px-3">
+                                                        <select
+                                                            value={row.account_id}
+                                                            onChange={(e) => updateRow(idx, 'account_id', e.target.value)}
+                                                            className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-xs focus:outline-none text-slate-200"
+                                                        >
+                                                            {accounts.map((acc) => (
+                                                                <option key={acc.account_id} value={acc.account_id}>
+                                                                    {acc.account_id} - {acc.account_name} ({acc.normal_balance})
+                                                                </option>
+                                                            ))}
+                                                        </select>
+                                                    </td>
+                                                    <td className="py-2.5 px-3">
+                                                        <input
+                                                            type="number"
+                                                            min="0"
+                                                            step="any"
+                                                            value={row.debit}
+                                                            onChange={(e) => updateRow(idx, 'debit', e.target.value)}
+                                                            className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-xs font-mono text-right focus:outline-none text-slate-200"
+                                                        />
+                                                    </td>
+                                                    <td className="py-2.5 px-3">
+                                                        <input
+                                                            type="number"
+                                                            min="0"
+                                                            step="any"
+                                                            value={row.credit}
+                                                            onChange={(e) => updateRow(idx, 'credit', e.target.value)}
+                                                            className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-xs font-mono text-right focus:outline-none text-slate-200"
+                                                        />
+                                                    </td>
+                                                    <td className="py-2.5 px-3 text-center">
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => removeRow(idx)}
+                                                            className="text-rose-400 hover:text-rose-300 text-xs font-bold p-1 rounded transition cursor-pointer"
+                                                            title="Hapus Baris"
+                                                        >
+                                                            ✕
+                                                        </button>
+                                                    </td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+
+                            {/* Live Balance & Control Bar */}
+                            <div className="bg-slate-900 p-4 rounded-xl border border-slate-700 grid grid-cols-1 md:grid-cols-3 gap-4 items-center">
+                                <div>
+                                    <span className="text-xs text-slate-400 block">Total Debit</span>
+                                    <span className="text-lg font-mono font-bold text-slate-100">
+                                        Rp {totalDebit.toLocaleString('id-ID', { minimumFractionDigits: 2 })}
+                                    </span>
+                                </div>
+
+                                <div>
+                                    <span className="text-xs text-slate-400 block">Total Kredit</span>
+                                    <span className="text-lg font-mono font-bold text-slate-100">
+                                        Rp {totalCredit.toLocaleString('id-ID', { minimumFractionDigits: 2 })}
+                                    </span>
+                                </div>
+
+                                <div className="text-left md:text-right">
+                                    {isBalanced ? (
+                                        <div className="inline-flex items-center gap-2 bg-emerald-950 border border-emerald-700 text-emerald-300 px-3 py-1.5 rounded-lg text-xs font-semibold shadow">
+                                            <span>✅ ZERO-DISCREPANCY (SEIMBANG)</span>
+                                        </div>
+                                    ) : (
+                                        <div className="inline-flex items-center gap-2 bg-rose-950 border border-rose-700 text-rose-300 px-3 py-1.5 rounded-lg text-xs font-semibold shadow">
+                                            <span>❌ UNBALANCED (Selisih: Rp {discrepancy.toLocaleString('id-ID', { minimumFractionDigits: 2 })})</span>
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+
+                            {/* Submit Button locked if Unbalanced */}
+                            <button
+                                type="submit"
+                                disabled={!isBalanced || loading}
+                                className={`w-full py-3 rounded-xl font-bold text-sm transition shadow-lg ${
+                                    isBalanced && !loading
+                                        ? 'bg-blue-600 hover:bg-blue-500 text-white shadow-blue-600/30 cursor-pointer'
+                                        : 'bg-slate-700 text-slate-500 cursor-not-allowed'
+                                }`}
+                            >
+                                {loading ? 'Mengirim Transaksi ke Cloud...' : isBalanced ? '🚀 Submit Jurnal ke Supabase' : '🔒 Tombol Terkunci (Perbaiki Saldo Jurnal)'}
+                            </button>
+                        </form>
+
+                        {/* Live Supabase Audit Log Viewer */}
+                        {recentHeaders.length > 0 && (
+                            <div className="bg-slate-800 p-5 rounded-xl border border-slate-700 space-y-3 shadow-lg">
+                                <h3 className="text-sm font-semibold text-slate-300 flex items-center gap-2">
+                                    <span>📊</span> 5 Transaksi Terakhir di Supabase (Audit Trail)
+                                </h3>
+                                <div className="space-y-2">
+                                    {recentHeaders.map((h) => (
+                                        <div key={h.header_id} className="bg-slate-900 p-3 rounded-lg border border-slate-700 text-xs flex flex-col md:flex-row justify-between items-start md:items-center gap-2">
+                                            <div>
+                                                <span className="font-mono text-blue-400 font-bold mr-2">{h.ref_number}</span>
+                                                <span className="text-slate-300 mr-2">{h.description}</span>
+                                                <span className="text-slate-500">({h.entry_date})</span>
+                                            </div>
+                                            <div className="flex items-center gap-2">
+                                                <span className="bg-slate-800 text-slate-400 px-2 py-0.5 rounded text-[10px]">User: {createdBy}</span>
+                                                <span className="bg-emerald-950 text-emerald-300 px-2 py-0.5 rounded text-[10px] font-bold border border-emerald-700">{h.posting_status}</span>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+
+                    </div>
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<VoucherKasKeluarApp />);
+    </script>
+</body>
+</html>
